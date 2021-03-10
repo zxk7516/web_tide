@@ -2,9 +2,12 @@ use crate::APool;
 use actix_web::{post, web, HttpResponse};
 use serde::Deserialize;
 
+use crate::dump;
+use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header};
+
 use crate::error::{
+    customer_error,
     ApiError::{self, *},
-    Msg,
 };
 
 #[derive(Deserialize)]
@@ -21,21 +24,21 @@ struct SqlGetUserByName {
     pub password: String,
 }
 #[derive(serde::Serialize)]
-struct UserInfo<'a, 'b> {
+struct UserInfo<'a> {
     pub id: u64,
     pub username: &'a str,
     #[serde(skip)]
-    pub password: &'b str,
+    pub password: &'a str,
 }
 
 #[post("/reg")]
 pub async fn reg(pool: web::Data<APool>, reg: web::Json<Reg>) -> Result<HttpResponse, ApiError> {
-    let row: sqlx::Result<(i33,)> = sqlx::query_as(r#"select id from users where username=?"#)
+    let row: sqlx::Result<(u64,)> = sqlx::query_as(r#"select id from users where username=?"#)
         .bind(&reg.username)
         .fetch_one(&**pool)
         .await;
     match row {
-        Ok(_e) => Err(CustomerError(Msg::new(40002, "user already exists"))),
+        Ok(_e) => Err(customer_error(40002, "user already exists")),
         Err(sqlx::Error::RowNotFound) => {
             let password = bcrypt::hash(&reg.password, 4)?;
             let id = sqlx::query(r#"insert into users (username,password) values(?,?)"#)
@@ -51,7 +54,10 @@ pub async fn reg(pool: web::Data<APool>, reg: web::Json<Reg>) -> Result<HttpResp
             };
             Ok(HttpResponse::Created().json(&u))
         }
-        _ => Err(UnknowError),
+        _e => {
+            let _ = dump!(_e);
+            Err(UnknowError)
+        }
     }
 }
 
@@ -61,17 +67,34 @@ pub async fn login(
     login: web::Json<Reg>,
 ) -> Result<HttpResponse, ApiError> {
     let row: SqlGetUserByName =
-        sqlx::query_as(r#"select id,username,paddword from users where username=?"#)
+        sqlx::query_as(r#"select id,username,password from users where username=?"#)
             .bind(&login.username)
             .fetch_one(&**pool)
             .await
             .map_err(|e| match e {
-                sqlx::Error::RowNotFound => CustomerError(Msg::new(40004, "item note exists")),
-                _ => UnknowError,
+                sqlx::Error::RowNotFound => customer_error(40004, "username note exists"),
+                _e => {
+                    let _ = dump!(_e);
+                    UnknowError
+                }
             })?;
-    if bcrypt::verify(&login.password, &row.password).map_err(|_| UnknowError)? {
+    if bcrypt::verify(&login.password, &row.password).map_err(|_e| {
+        let _ = dump!(_e);
+        UnknowError
+    })? {
+        let key = EncodingKey::from_secret("123".as_bytes());
+        let alg = Algorithm::HS256;
+        let headers = Header::new(alg);
+        let token = encode(&headers, &row, &key).map_err(|_e| {
+            let _ = dump!(_e);
+            customer_error(50001, "jwt error")
+        })?;
+        Ok(HttpResponse::Created().json(&token))
     } else {
+        Err(customer_error(1, "login failed"))
     }
-
-    todo!()
 }
+
+
+
+
